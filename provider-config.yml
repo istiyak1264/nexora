@@ -1,62 +1,73 @@
+# Nexora provider configuration.
+# Keep secrets in environment variables; never commit real API keys.
+# Providers are passive by default. Active DNS validation requires --active.
 settings:
   timeout_seconds: 20
   concurrency: 8
   requests_per_second: 4
   max_candidates: 100000
+  max_retries: 2
+  retry_backoff_seconds: 2
   user_agent: "Nexora/0.4 authorized-security-research"
+
 providers:
+  # Public/no-key sources enabled by default.
   crtsh:
     enabled: true
     api_key: ""
     requests_per_second: 1
-  certspotter:
-    enabled: true
-    api_key: "${CERTSPOTTER_API_KEY}"
-    requests_per_second: 1
   hackertarget:
     enabled: true
-    api_key: "${HACKERTARGET_API_KEY}"
+    api_key: ""
     requests_per_second: 1
   alienvault:
     enabled: true
-    api_key: "${OTX_API_KEY}"
+    api_key: ""
+    requests_per_second: 1
+  wayback:
+    enabled: true
+    api_key: ""
+    requests_per_second: 0.5
+  commoncrawl:
+    enabled: true
+    api_key: ""
+    requests_per_second: 0.2
+  anubisdb:
+    enabled: true
+    api_key: ""
+    requests_per_second: 0.2
+
+  # User-provided credential. Export SHODAN_API_KEY before running.
+  shodan:
+    enabled: true
+    api_key: "${SHODAN_API_KEY}"
+    requests_per_second: 1
+
+  # Key-required or account-dependent providers disabled until configured.
+  certspotter:
+    enabled: false
+    api_key: "${CERTSPOTTER_API_KEY}"
     requests_per_second: 1
   urlscan:
-    enabled: true
+    enabled: false
     api_key: "${URLSCAN_API_KEY}"
     requests_per_second: 1
   virustotal:
-    enabled: true
+    enabled: false
     api_key: "${VIRUSTOTAL_API_KEY}"
     requests_per_second: 1
   securitytrails:
     enabled: false
     api_key: "${SECURITYTRAILS_API_KEY}"
     requests_per_second: 1
-  shodan:
-    enabled: false
-    api_key: "${SHODAN_API_KEY}"
-    requests_per_second: 1
   chaos:
     enabled: false
     api_key: "${CHAOS_API_KEY}"
     requests_per_second: 1
-  wayback:
-    enabled: true
-    api_key: ""
-    requests_per_second: 0.5
   github:
     enabled: false
     api_key: "${GITHUB_TOKEN}"
     requests_per_second: 1
-  commoncrawl:
-    enabled: false
-    api_key: ""
-    requests_per_second: 0.2
-  anubisdb:
-    enabled: false
-    api_key: ""
-    requests_per_second: 0.2
   bufferover:
     enabled: false
     api_key: "${BUFFEROVER_API_KEY}"

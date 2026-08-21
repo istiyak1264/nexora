@@ -31,6 +31,8 @@ type Settings struct {
 	Concurrency   int     `yaml:"concurrency"`
 	RPS           float64 `yaml:"requests_per_second"`
 	MaxCandidates int     `yaml:"max_candidates"`
+	MaxRetries    int     `yaml:"max_retries"`
+	RetryBackoff  int     `yaml:"retry_backoff_seconds"`
 	UserAgent     string  `yaml:"user_agent"`
 }
 type Config struct {
@@ -64,6 +66,8 @@ type Provider interface {
 type httpProvider struct {
 	name, endpoint, key, ua string
 	client                  *http.Client
+	retries                 int
+	backoff                 time.Duration
 }
 
 type throttledProvider struct {
@@ -101,28 +105,52 @@ func (p *throttledProvider) Collect(ctx context.Context, domain string) ([]strin
 func (p httpProvider) Name() string { return p.name }
 func (p httpProvider) Collect(ctx context.Context, domain string) ([]string, error) {
 	ep := strings.ReplaceAll(p.endpoint, "{domain}", url.QueryEscape(domain))
-	req, e := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
-	if e != nil {
-		return nil, e
+	attempts := p.retries + 1
+	if attempts < 1 {
+		attempts = 1
 	}
-	if p.key != "" {
-		req.Header.Set("X-Api-Key", p.key)
-		req.Header.Set("Authorization", "Bearer "+p.key)
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		req, e := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+		if e != nil {
+			return nil, e
+		}
+		if p.key != "" {
+			req.Header.Set("X-Api-Key", p.key)
+			req.Header.Set("Authorization", "Bearer "+p.key)
+		}
+		req.Header.Set("User-Agent", p.ua)
+		resp, e := p.client.Do(req)
+		if e != nil {
+			lastErr = e
+		} else {
+			b, readErr := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+			} else if resp.StatusCode < 400 {
+				return extractHosts(string(b), domain), nil
+			} else {
+				lastErr = fmt.Errorf("%s returned %s", p.name, resp.Status)
+				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+					return nil, lastErr
+				}
+			}
+		}
+		if attempt+1 < attempts {
+			delay := p.backoff * time.Duration(attempt+1)
+			if delay > 0 {
+				t := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return nil, ctx.Err()
+				case <-t.C:
+				}
+			}
+		}
 	}
-	req.Header.Set("User-Agent", p.ua)
-	resp, e := p.client.Do(req)
-	if e != nil {
-		return nil, e
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("%s returned %s", p.name, resp.Status)
-	}
-	b, e := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
-	if e != nil {
-		return nil, e
-	}
-	return extractHosts(string(b), domain), nil
+	return nil, lastErr
 }
 
 var hostRE = regexp.MustCompile(`(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`)
@@ -166,6 +194,18 @@ func loadConfig(path string) (Config, error) {
 	if c.Settings.MaxCandidates < 1 {
 		c.Settings.MaxCandidates = 100000
 	}
+	if c.Settings.MaxRetries < 0 {
+		c.Settings.MaxRetries = 0
+	}
+	if c.Settings.MaxRetries > 5 {
+		c.Settings.MaxRetries = 5
+	}
+	if c.Settings.RetryBackoff < 0 {
+		c.Settings.RetryBackoff = 0
+	}
+	if c.Settings.RetryBackoff == 0 {
+		c.Settings.RetryBackoff = 2
+	}
 	if c.Settings.UserAgent == "" {
 		c.Settings.UserAgent = "Nexora/0.2 authorized-security-research"
 	}
@@ -191,7 +231,7 @@ func passiveProviders(c Config) []Provider {
 			timeout = c.Settings.Timeout
 		}
 		client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
-		base := httpProvider{name: n, endpoint: ep, key: env(pc.APIKey), ua: c.Settings.UserAgent, client: client}
+		base := httpProvider{name: n, endpoint: ep, key: env(pc.APIKey), ua: c.Settings.UserAgent, client: client, retries: c.Settings.MaxRetries, backoff: time.Duration(c.Settings.RetryBackoff) * time.Second}
 		rps := pc.RPS
 		if rps <= 0 {
 			rps = c.Settings.RPS
@@ -205,6 +245,38 @@ func passiveProviders(c Config) []Provider {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out
 }
+func availableProviderNames() []string {
+	return []string{"alienvault", "anubisdb", "bufferover", "certspotter", "chaos", "commoncrawl", "crtsh", "github", "hackertarget", "securitytrails", "shodan", "urlscan", "virustotal", "wayback"}
+}
+
+func csvValues(value string) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item != "" {
+			out[item] = true
+		}
+	}
+	return out
+}
+
+func selectProviders(providers []Provider, include, exclude string) []Provider {
+	wanted := csvValues(include)
+	blocked := csvValues(exclude)
+	out := []Provider{}
+	for _, p := range providers {
+		name := strings.ToLower(p.Name())
+		if len(wanted) > 0 && !wanted[name] {
+			continue
+		}
+		if blocked[name] {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 func normalize(h, domain string) string {
 	h = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(h, ".")))
 	h = strings.TrimPrefix(h, "*.")
@@ -385,13 +457,11 @@ func discoverWordlist(ctx context.Context, domain, wordlist string, limit, worke
 	for i := 0; i < workers; i++ {
 		go worker()
 	}
-
-sendJobs:
 	for _, h := range cand {
 		select {
 		case jobs <- h:
 		case <-ctx.Done():
-			break sendJobs
+			return nil
 		}
 	}
 	close(jobs)
@@ -491,10 +561,19 @@ func main() {
 	activeFlag := flag.Bool("active", false, "enable DNS wordlist validation")
 	wordlist := flag.String("wordlist", "", "wordlist for active validation")
 	permute := flag.Bool("permute", false, "generate conservative permutations")
+	sources := flag.String("sources", "", "comma-separated provider names to use")
+	excludeSources := flag.String("exclude-sources", "", "comma-separated provider names to skip")
+	listSources := flag.Bool("list-sources", false, "list built-in provider names and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("nexora", version)
+		return
+	}
+	if *listSources {
+		for _, name := range availableProviderNames() {
+			fmt.Println(name)
+		}
 		return
 	}
 	if *configAlias != "" {
@@ -522,10 +601,11 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Settings.Timeout+120)*time.Second)
 	defer cancel()
+	providers := selectProviders(passiveProviders(cfg), *sources, *excludeSources)
 	findings := map[string]*Finding{}
 	var mu sync.Mutex
 	collect := func(root string) {
-		for _, p := range passiveProviders(cfg) {
+		for _, p := range providers {
 			vals, err := p.Collect(ctx, root)
 
 			if err != nil {
@@ -584,14 +664,37 @@ func main() {
 	for _, x := range findings {
 		sort.Strings(x.Sources)
 		x.Sources = unique(x.Sources)
-		if *records {
-			x.DNS, _ = resolveRecords(ctx, x.Subdomain)
-		}
-		if *webProbe {
-			x.Web = probe(ctx, x.Subdomain)
-		}
 		xs = append(xs, *x)
 	}
+	workers := cfg.Settings.Concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan int)
+	var enrichWG sync.WaitGroup
+	enrich := func() {
+		defer enrichWG.Done()
+		for i := range jobs {
+			if *records {
+				xs[i].DNS, _ = resolveRecords(ctx, xs[i].Subdomain)
+			}
+			if *webProbe {
+				xs[i].Web = probe(ctx, xs[i].Subdomain)
+			}
+		}
+	}
+	if workers > len(xs) {
+		workers = len(xs)
+	}
+	enrichWG.Add(workers)
+	for i := 0; i < workers; i++ {
+		go enrich()
+	}
+	for i := range xs {
+		jobs <- i
+	}
+	close(jobs)
+	enrichWG.Wait()
 	sort.Slice(xs, func(i, j int) bool { return xs[i].Subdomain < xs[j].Subdomain })
 	if *snapshot != "" {
 		if e := saveSnapshot(*snapshot, xs); e != nil {

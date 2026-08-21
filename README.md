@@ -18,6 +18,8 @@ Nexora is a provider-configurable, passive-first subdomain discovery CLI for **a
 | JSONL output | Produces machine-readable records suitable for pipelines and asset inventories. |
 | Snapshots and diffs | Saves findings and reports newly observed or removed hostnames between runs. |
 | Provider pacing | Enforces configured per-provider request rates across concurrent domains. |
+| Resilient collection | Retries transient network, 429, and 5xx failures with bounded backoff. |
+| Concurrent enrichment | Performs optional DNS and HTTP enrichment through a bounded worker pool. |
 
 ## Installation
 
@@ -87,6 +89,9 @@ nexora [options]
 | `-records` | Add structured DNS records to JSONL findings. |
 | `-active -wordlist words.txt` | Enable bounded DNS wordlist validation. |
 | `-permute` | Generate conservative permutations from passive results. |
+| `-sources a,b,c` | Use only the named configured providers. |
+| `-exclude-sources a,b` | Skip named providers even if enabled in the configuration. |
+| `-list-sources` | List all built-in provider names and exit. |
 | `-web-probe` | Opt in to low-volume HTTP/HTTPS metadata probes. |
 | `-snapshot current.json` | Save the current findings as a JSON snapshot. |
 | `-diff previous.json` | Report new and removed hostnames against a previous snapshot. |
@@ -94,6 +99,33 @@ nexora [options]
 | `-help` | Show the built-in flag reference. |
 
 A domain or scope is required. Nexora rejects values containing URL syntax, spaces, or other invalid scope characters.
+
+## Recommended free profile
+
+The included `provider-config.yml` enables the public/no-key or publicly accessible sources that Nexora supports and enables Shodan through `${SHODAN_API_KEY}`. It disables providers that normally require separate accounts or keys. A strictly no-key run can select only the public sources:
+
+```bash
+./nexora \
+  -domain example.com \
+  -sources crtsh,hackertarget,alienvault,wayback,commoncrawl,anubisdb \
+  -jsonl \
+  -o results/free.jsonl
+```
+
+A run that also uses the user’s Shodan key is:
+
+```bash
+export SHODAN_API_KEY='your-real-shodan-key'
+./nexora \
+  -domain example.com \
+  -sources crtsh,hackertarget,alienvault,wayback,commoncrawl,anubisdb,shodan \
+  -jsonl \
+  -o results/free-plus-shodan.jsonl
+```
+
+Use `-list-sources` to see the built-in provider names. Provider selection never overrides authorization scope, response filtering, rate limits, or provider terms.
+
+Transient provider network errors, HTTP 429 responses, and HTTP 5xx responses are retried according to `settings.max_retries` and `settings.retry_backoff_seconds`. Client errors such as 401 and 403 are returned immediately because retrying cannot create authorization. When `-records` or `-web-probe` is enabled, enrichment runs through the bounded `settings.concurrency` worker pool instead of creating one unbounded goroutine per finding.
 
 ## Common workflows
 
@@ -209,7 +241,13 @@ New and removed hostnames are written to stderr as `[new]` and `[removed]` event
 
 ## Provider configuration
 
-The default file is `provider-config.yml`. Secrets should be supplied through environment variables rather than written directly into the file:
+The default file is `provider-config.yml`. This distribution enables public/no-key sources plus Shodan and disables separate account-dependent providers. Secrets should be supplied through environment variables rather than written directly into the file. Configure your Shodan key before running:
+
+```bash
+export SHODAN_API_KEY='your-shodan-key'
+```
+
+Do not paste a real key into source control or into a shared configuration file.
 
 ```yaml
 settings:
@@ -217,6 +255,8 @@ settings:
   concurrency: 8
   requests_per_second: 4
   max_candidates: 100000
+  max_retries: 2
+  retry_backoff_seconds: 2
   user_agent: "Nexora/0.4 authorized-security-research"
 
 providers:
@@ -239,19 +279,19 @@ A provider is queried only when its `enabled` value is `true`. Provider-specific
 | Provider | Typical access | Default state | Notes |
 |---|---|---:|---|
 | `crtsh` | Public certificate-transparency service | Enabled | Useful for certificate names; subject to service availability. |
-| `certspotter` | Free tier with registration/key | Enabled | Certificate-transparency search. |
+| `certspotter` | Free tier with registration/key | Disabled | Enable after setting `CERTSPOTTER_API_KEY`. |
 | `hackertarget` | Public/free limited service | Enabled | Host search endpoint and provider quotas apply. |
 | `alienvault` | Public/free access with optional key | Enabled | Passive DNS and threat-intelligence data. |
-| `urlscan` | Public/free limited service with optional key | Enabled | Public URL-index search. |
-| `virustotal` | API key required; free tier is limited | Enabled | Review current API terms and quotas. |
+| `urlscan` | Public/free limited service with optional key | Disabled | Enable after reviewing current access terms and setting `URLSCAN_API_KEY` if required. |
+| `virustotal` | API key required; free tier is limited | Disabled | Enable after setting `VIRUSTOTAL_API_KEY`. |
 | `wayback` | Public archive endpoint | Enabled | Historical URLs may contain stale names. |
 | `securitytrails` | Account/key required | Disabled | Enable only with an authorized account. |
-| `shodan` | Account/key required | Disabled | Enable only with an authorized account. |
+| `shodan` | Account/key required | Enabled | Uses `${SHODAN_API_KEY}` from the environment. |
 | `chaos` | Account/key required | Disabled | Enable only with an authorized account. |
 | `github` | GitHub token recommended/required for useful quotas | Disabled | Searches public code; respect GitHub terms. |
-| `commoncrawl` | Public index endpoint | Disabled | Index names change and historical data may be stale. |
-| `anubisdb` | Public GET lookup | Disabled | Open subdomain database; use conservatively. |
-| `bufferover` | Free limited key-based tier | Disabled | Documented free tier is quota-limited and non-commercial. |
+| `commoncrawl` | Public index endpoint | Enabled | Index names change and historical data may be stale. |
+| `anubisdb` | Public GET lookup | Enabled | Open subdomain database; use conservatively. |
+| `bufferover` | Free limited key-based tier | Disabled | Requires a user-supplied key; documented free tier is quota-limited and non-commercial. |
 
 Do not assume that a free tier means unlimited access, commercial permission, or permission to automate at high volume. Review each provider’s current terms, quotas, and acceptable-use policy before enabling it.
 
@@ -289,6 +329,17 @@ The exact fields present depend on enabled enrichment options. Plain output cont
 | Active mode finds nothing | Wildcard DNS, stale wordlist, or no DNS records | Verify wildcard behavior and use a target-relevant wordlist. |
 | HTTP probe reports TLS errors | The host has an invalid or incomplete certificate | Treat the error as observation; Nexora does not disable certificate verification. |
 | Results contain old names | Archive and historical sources intentionally include stale observations | Use `-records` and current DNS validation before treating a name as live. |
+
+## Stronger coverage without unsafe behavior
+
+Nexora’s coverage improves by combining independent passive sources, preserving every contributing source, retrying transient provider failures, and validating current DNS only when explicitly requested. It does not equate “more powerful” with indiscriminate Internet scanning. Historical sources can reveal forgotten names, certificate sources can reveal names that were never linked publicly, and passive-DNS sources can reveal names that are absent from current certificates; combining these observations is more useful than relying on one provider.
+
+For the strongest authorized workflow, run a passive baseline, repeat it with the user’s permitted keyed providers, add `-records` for current DNS evidence, and compare snapshots over time:
+
+```bash
+./nexora -domain example.com -jsonl -snapshot snapshots/passive.json -o results/passive.jsonl
+./nexora -domain example.com -records -jsonl -snapshot snapshots/current.json -diff snapshots/passive.json -o results/current.jsonl
+```
 
 ## Design limitations
 
