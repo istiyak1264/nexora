@@ -1,6 +1,4 @@
 # Nexora provider configuration.
-# Keep secrets in environment variables; never commit real API keys.
-# Providers are passive by default. Active DNS validation requires --active.
 settings:
   timeout_seconds: 20
   concurrency: 8
@@ -36,14 +34,10 @@ providers:
     enabled: true
     api_key: ""
     requests_per_second: 0.2
-
-  # User-provided credential. Export SHODAN_API_KEY before running.
   shodan:
     enabled: true
     api_key: "${SHODAN_API_KEY}"
     requests_per_second: 1
-
-  # Key-required or account-dependent providers disabled until configured.
   certspotter:
     enabled: false
     api_key: "${CERTSPOTTER_API_KEY}"
