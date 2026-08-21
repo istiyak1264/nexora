@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+go build -trimpath -ldflags='-s -w' -o nexora ./cmd/nexora
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
