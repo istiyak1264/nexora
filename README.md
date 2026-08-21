@@ -23,6 +23,33 @@ Nexora is a provider-configurable, passive-first subdomain discovery CLI for **a
 
 ## Installation
 
+### Install as the `nexora` command
+
+The package includes `install.sh`, which installs the binary to `/usr/local/bin/nexora` and the sample provider configuration to `/etc/nexora/provider-config.yml`:
+
+```bash
+sudo ./install.sh
+hash -r
+nexora --version
+```
+
+After installation, use Nexora without `./` or a YAML path:
+
+```bash
+nexora --domain pust.ac.bd --live-only --output live-hosts.txt
+nexora --domain pust.ac.bd --urls --output working-links.txt
+```
+
+For a per-user installation without `sudo`, set a writable prefix and configuration directory:
+
+```bash
+PREFIX="$HOME/.local" SYSCONFDIR="$HOME/.config/nexora" ./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+nexora --version
+```
+
+The binary automatically searches `NEXORA_CONFIG`, beside the executable, the current directory, `/etc/nexora/provider-config.yml`, and the user configuration directory. An explicit `-config` or `-provider-config` path remains an override.
+
 ### Use the prebuilt binary
 
 Download or copy the Linux AMD64 binary, make it executable, and place it somewhere on your `PATH`:
@@ -33,7 +60,7 @@ sudo install -m 0755 nexora-linux-amd64 /usr/local/bin/nexora
 nexora -version
 ```
 
-The binary is platform-specific. Build from source when using another operating system or CPU architecture.
+The binary is platform-specific. Build from source when using another operating system or CPU architecture. On Linux AMD64, the installed command is `/usr/local/bin/nexora`.
 
 ### Build from source
 
@@ -56,7 +83,7 @@ Check the installation:
 
 ## Quick start
 
-The simplest run queries the providers enabled in `provider-config.yml` and prints one normalized hostname per line:
+The simplest run queries the providers enabled in `provider-config.yml` and prints one normalized hostname per line. Passive providers may return historical or stale observations; use `-live-only` to keep only hosts with current DNS data or `-urls` to keep only hosts that return an HTTP(S) response and emit clickable URLs:
 
 ```bash
 ./nexora -domain example.com
@@ -93,6 +120,8 @@ nexora [options]
 | `-exclude-sources a,b` | Skip named providers even if enabled in the configuration. |
 | `-list-sources` | List all built-in provider names and exit. |
 | `-web-probe` | Opt in to low-volume HTTP/HTTPS metadata probes. |
+| `-live-only` | Keep only findings with current DNS records. |
+| `-urls` | Keep findings with HTTP(S) responses and write responding URLs instead of hostnames. |
 | `-snapshot current.json` | Save the current findings as a JSON snapshot. |
 | `-diff previous.json` | Report new and removed hostnames against a previous snapshot. |
 | `-version` | Print the Nexora version and exit. |
@@ -100,27 +129,41 @@ nexora [options]
 
 A domain or scope is required. Nexora rejects values containing URL syntax, spaces, or other invalid scope characters.
 
+## Working-link output
+
+To replace stale passive observations with current DNS-backed hostnames:
+
+```bash
+./nexora -domain pust.ac.bd -live-only -o live-hosts.txt
+```
+
+To write only URLs that returned an HTTP or HTTPS response:
+
+```bash
+./nexora -domain pust.ac.bd -urls -o working-links.txt
+```
+
+For troubleshooting and provenance, prefer JSONL:
+
+```bash
+./nexora -domain pust.ac.bd -urls -jsonl -o working-links.jsonl
+```
+
+A response with status `401` or `403` is a reachable service but is not publicly accessible. A DNS-resolving host can still have a closed port, TLS problem, timeout, or application error; no passive enumerator can guarantee that every historical hostname is currently usable.
+
 ## Recommended free profile
 
 The included `provider-config.yml` enables the public/no-key or publicly accessible sources that Nexora supports and enables Shodan through `${SHODAN_API_KEY}`. It disables providers that normally require separate accounts or keys. A strictly no-key run can select only the public sources:
 
 ```bash
-./nexora \
-  -domain example.com \
-  -sources crtsh,hackertarget,alienvault,wayback,commoncrawl,anubisdb \
-  -jsonl \
-  -o results/free.jsonl
+./nexora -domain example.com -sources crtsh,hackertarget,alienvault,wayback,commoncrawl,anubisdb -jsonl -o results/free.jsonl
 ```
 
 A run that also uses the user’s Shodan key is:
 
 ```bash
 export SHODAN_API_KEY='your-real-shodan-key'
-./nexora \
-  -domain example.com \
-  -sources crtsh,hackertarget,alienvault,wayback,commoncrawl,anubisdb,shodan \
-  -jsonl \
-  -o results/free-plus-shodan.jsonl
+./nexora -domain example.com -sources crtsh,hackertarget,alienvault,wayback,commoncrawl,anubisdb,shodan -jsonl -o results/free-plus-shodan.jsonl
 ```
 
 Use `-list-sources` to see the built-in provider names. Provider selection never overrides authorization scope, response filtering, rate limits, or provider terms.
@@ -132,11 +175,7 @@ Transient provider network errors, HTTP 429 responses, and HTTP 5xx responses ar
 ### Passive discovery
 
 ```bash
-./nexora \
-  -domain example.com \
-  -config ./provider-config.yml \
-  -jsonl \
-  -o results/example.com.jsonl
+./nexora -domain example.com -config ./provider-config.yml -jsonl -o results/example.com.jsonl
 ```
 
 This is the recommended default workflow. It does not brute-force labels or make HTTP requests to each discovered host.
@@ -155,21 +194,13 @@ example.org
 Run the collection with exclusions:
 
 ```bash
-./nexora \
-  -scope-file authorized-domains.txt \
-  -exclude dev.example.com,legacy.example.org \
-  -jsonl \
-  -o results/inventory.jsonl
+./nexora -scope-file authorized-domains.txt -exclude dev.example.com,legacy.example.org -jsonl -o results/inventory.jsonl
 ```
 
 ### DNS enrichment
 
 ```bash
-./nexora \
-  -domain example.com \
-  -records \
-  -jsonl \
-  -o results/dns.jsonl
+./nexora -domain example.com -records -jsonl -o results/dns.jsonl
 ```
 
 Each finding may include `A`, `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, and a DNS `status` field. DNS results are observations at scan time and should not be treated as permanent truth.
@@ -179,12 +210,7 @@ Each finding may include `A`, `AAAA`, `CNAME`, `MX`, `NS`, `TXT`, and a DNS `sta
 Active validation is opt-in. Use it only when the authorization explicitly permits DNS queries against the target:
 
 ```bash
-./nexora \
-  -domain example.com \
-  -active \
-  -wordlist ./wordlists/subdomains.txt \
-  -jsonl \
-  -o results/active.jsonl
+./nexora -domain example.com -active -wordlist ./wordlists/subdomains.txt -jsonl -o results/active.jsonl
 ```
 
 The wordlist stage ignores blank lines, comments, malformed labels, duplicate labels, and labels over 63 characters. Candidate count is capped by `settings.max_candidates`, and DNS work is performed by a bounded worker pool.
@@ -192,11 +218,7 @@ The wordlist stage ignores blank lines, comments, malformed labels, duplicate la
 ### Conservative permutations
 
 ```bash
-./nexora \
-  -domain example.com \
-  -permute \
-  -jsonl \
-  -o results/permutations.jsonl
+./nexora -domain example.com -permute -jsonl -o results/permutations.jsonl
 ```
 
 Permutations use a small, auditable set of labels such as `api`, `dev`, `staging`, `admin`, `test`, `uat`, and `preview`. They are candidates, not verified assets, until DNS validation succeeds.
@@ -204,12 +226,7 @@ Permutations use a small, auditable set of labels such as `api`, `dev`, `staging
 ### Optional HTTP metadata
 
 ```bash
-./nexora \
-  -domain example.com \
-  -records \
-  -web-probe \
-  -jsonl \
-  -o results/web.jsonl
+./nexora -domain example.com -records -web-probe -jsonl -o results/web.jsonl
 ```
 
 The probe checks HTTP and HTTPS on discovered hostnames, records status, title, and the `Server` header, validates TLS certificates normally, does not follow redirects, and does not crawl, submit forms, brute-force paths, or exploit services. Enable it only when the rules of engagement allow HTTP probing.
@@ -219,22 +236,13 @@ The probe checks HTTP and HTTPS on discovered hostnames, records status, title, 
 Create a baseline:
 
 ```bash
-./nexora \
-  -domain example.com \
-  -jsonl \
-  -snapshot snapshots/example.com.json \
-  -o results/baseline.jsonl
+./nexora -domain example.com -jsonl -snapshot snapshots/example.com.json -o results/baseline.jsonl
 ```
 
 Compare a later run with the baseline:
 
 ```bash
-./nexora \
-  -domain example.com \
-  -jsonl \
-  -snapshot snapshots/example.com-latest.json \
-  -diff snapshots/example.com.json \
-  -o results/latest.jsonl
+./nexora -domain example.com -jsonl -snapshot snapshots/example.com-latest.json -diff snapshots/example.com.json -o results/latest.jsonl
 ```
 
 New and removed hostnames are written to stderr as `[new]` and `[removed]` events. JSON output remains suitable for downstream processing.

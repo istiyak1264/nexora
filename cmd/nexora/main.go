@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -543,7 +544,38 @@ func saveSnapshot(path string, xs []Finding) error {
 	return os.WriteFile(path, b, 0600)
 }
 
-const version = "0.4.0"
+const version = "0.5.0"
+
+func flagWasSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+func discoverConfigPath(defaultPath string) string {
+	candidates := []string{}
+	if envPath := strings.TrimSpace(os.Getenv("NEXORA_CONFIG")); envPath != "" {
+		candidates = append(candidates, envPath)
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "provider-config.yml"))
+	}
+	candidates = append(candidates, defaultPath)
+	candidates = append(candidates, "/etc/nexora/provider-config.yml")
+	if dir, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(dir, "nexora", "provider-config.yml"))
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return defaultPath
+}
 
 func main() {
 	domainFlag := flag.String("domain", "", "authorized root domain(s), comma-separated")
@@ -558,6 +590,8 @@ func main() {
 	jsonl := flag.Bool("jsonl", false, "emit JSONL")
 	records := flag.Bool("records", false, "collect structured DNS records")
 	webProbe := flag.Bool("web-probe", false, "opt-in HTTP metadata probes on discovered hosts")
+	liveOnly := flag.Bool("live-only", false, "keep only hosts with current DNS records")
+	urlsOnly := flag.Bool("urls", false, "emit reachable HTTP(S) URLs instead of hostnames")
 	activeFlag := flag.Bool("active", false, "enable DNS wordlist validation")
 	wordlist := flag.String("wordlist", "", "wordlist for active validation")
 	permute := flag.Bool("permute", false, "generate conservative permutations")
@@ -576,8 +610,13 @@ func main() {
 		}
 		return
 	}
+	configExplicit := flagWasSet("provider-config")
 	if *configAlias != "" {
 		*cfgPath = *configAlias
+		configExplicit = true
+	}
+	if !configExplicit {
+		*cfgPath = discoverConfigPath(*cfgPath)
 	}
 	if *outputAlias != "" {
 		*outPath = *outputAlias
@@ -675,10 +714,10 @@ func main() {
 	enrich := func() {
 		defer enrichWG.Done()
 		for i := range jobs {
-			if *records {
+			if *records || *liveOnly || *urlsOnly {
 				xs[i].DNS, _ = resolveRecords(ctx, xs[i].Subdomain)
 			}
-			if *webProbe {
+			if *webProbe || *urlsOnly {
 				xs[i].Web = probe(ctx, xs[i].Subdomain)
 			}
 		}
@@ -695,8 +734,30 @@ func main() {
 	}
 	close(jobs)
 	enrichWG.Wait()
+	if *liveOnly || *urlsOnly {
+		filtered := xs[:0]
+		for _, x := range xs {
+			if *urlsOnly {
+				reachable := false
+				for _, meta := range x.Web {
+					if meta.Status > 0 {
+						reachable = true
+						break
+					}
+				}
+				if !reachable {
+					continue
+				}
+			} else if x.DNS.Status != "NOERROR" {
+				continue
+			}
+			filtered = append(filtered, x)
+		}
+		xs = filtered
+	}
 	sort.Slice(xs, func(i, j int) bool { return xs[i].Subdomain < xs[j].Subdomain })
 	if *snapshot != "" {
+
 		if e := saveSnapshot(*snapshot, xs); e != nil {
 			fmt.Fprintln(os.Stderr, "snapshot:", e)
 		}
@@ -728,10 +789,17 @@ func main() {
 		if *jsonl {
 			b, _ := json.Marshal(x)
 			fmt.Fprintln(w, string(b))
+		} else if *urlsOnly {
+			for _, meta := range x.Web {
+				if meta.Status > 0 {
+					fmt.Fprintln(w, meta.URL)
+				}
+			}
 		} else {
 			fmt.Fprintln(w, x.Subdomain)
 		}
 	}
+
 }
 func unique(xs []string) []string {
 	m := map[string]bool{}
