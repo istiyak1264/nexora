@@ -36,8 +36,8 @@ nexora --version
 After installation, use Nexora without `./` or a YAML path:
 
 ```bash
-nexora --domain pust.ac.bd --live-only --output live-hosts.txt
-nexora --domain pust.ac.bd --urls --output working-links.txt
+nexora --domain example.com --live-only --output live-hosts.txt
+nexora --domain example.com --urls --output working-links.txt
 ```
 
 For a per-user installation without `sudo`, set a writable prefix and configuration directory:
@@ -134,19 +134,19 @@ A domain or scope is required. Nexora rejects values containing URL syntax, spac
 To replace stale passive observations with current DNS-backed hostnames:
 
 ```bash
-./nexora -domain pust.ac.bd -live-only -o live-hosts.txt
+./nexora -domain example.com -live-only -o live-hosts.txt
 ```
 
 To write only URLs that returned an HTTP or HTTPS response:
 
 ```bash
-./nexora -domain pust.ac.bd -urls -o working-links.txt
+./nexora -domain example.com -urls -o working-links.txt
 ```
 
 For troubleshooting and provenance, prefer JSONL:
 
 ```bash
-./nexora -domain pust.ac.bd -urls -jsonl -o working-links.jsonl
+./nexora -domain example.com -urls -jsonl -o working-links.jsonl
 ```
 
 A response with status `401` or `403` is a reachable service but is not publicly accessible. A DNS-resolving host can still have a closed port, TLS problem, timeout, or application error; no passive enumerator can guarantee that every historical hostname is currently usable.
